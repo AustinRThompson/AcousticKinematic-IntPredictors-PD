@@ -1,0 +1,744 @@
+---
+title: "Acoustic and Kinematic Predictors of Intelligibility and Articulatory Precision in Parkinson’s Disease"
+---
+
+
+```{r}
+# Starting with a clean environment
+rm(list = ls())
+```
+
+# Packages
+```{r}
+library(tidyverse) # install.packages('tidyverse')
+library(emmeans)
+library(robustlmm) # install.packages("robustlmm")
+library(ggpubr) # install.packages('ggpubr')
+library(plyr) # install.packages('plyr')
+library(beepr) # install.packages('beepr')
+library(plotrix) # install.packages('plotrix')
+```
+
+# Load Data
+```{r}
+speakerList <- rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/Speaker%20List_Clean.csv")
+```
+
+## Listener Descriptions
+```{r}
+listenerRatings <- rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/ListenerData/ListenerRatings_allRatings.csv")
+
+ratingCount <- listenerRatings %>%
+  dplyr::group_by(StudyID, ratingType) %>%
+  dplyr::summarise(n = NROW(Rating)) %>%
+  dplyr::ungroup()
+
+ratingCount %>%
+  dplyr::summarise(mean = mean(n),
+                   sd = sd(n),
+                   min = min(n),
+                   max = max(n))
+
+NROW(unique(listenerRatings$ListenerID))
+
+listenerDemo <- rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/ListenerData/ListenerDemographics.csv")
+NROW(unique(listenerDemo$ListenerID))
+
+# Age and N
+listenerDemo %>%
+  dplyr::mutate(duration = `Duration (in seconds)`/60) %>%
+  #dplyr::group_by(gender) %>%
+  dplyr::summarise(age_m = mean(age, na.rm = T),
+                   age_sd = sd(age, na.rm = T),
+                   min = base::min(age, na.rm = T),
+                   max = base::max(age, na.rm = T),
+                   N = NROW(age),
+                   duration_M = base::mean(duration, na.rm = T),
+                   duration_sd = sd(duration, na.rm = T))
+
+listenerDemo %>%
+  dplyr::mutate(duration = `Duration (in seconds)`/60) %>%
+  dplyr::group_by(gender) %>%
+  dplyr::summarise(N = NROW(age))
+
+listenerDemo %>%
+  dplyr::mutate(duration = `Duration (in seconds)`/60) %>%
+  dplyr::group_by(race) %>%
+  dplyr::summarise(N = NROW(race))
+
+listenerDemo %>%
+  dplyr::mutate(duration = `Duration (in seconds)`/60) %>%
+  dplyr::group_by(ethnicity) %>%
+  dplyr::summarise(N = NROW(ethnicity))
+```
+
+# APA reporting function
+```{r}
+
+apa_lmResults <- function(model, fixedEffect) {
+  
+coefficients <- summary(model)[["coefficients"]] %>%
+  as.data.frame() %>%
+  dplyr::rename(
+    stdError = `Std. Error`,
+    t = `t value`,
+    p = `Pr(>|t|)`) %>%
+  dplyr::mutate(
+    Estimate = round(Estimate, digits = 2),
+    #df = round(df, digits = 2),
+    t = round(t, digits = 2),
+    p = round(p, digits = 3),
+  ) %>%
+  dplyr::filter(rownames(.) == fixedEffect)
+
+if(coefficients$p < .001) {
+  p <- "p<.001"
+} else {
+  p <- paste0("p=",as.numeric(coefficients$p))
+}
+
+df <- as.numeric(model$df.residual)
+t <- paste0("t(",df,")=", as.numeric(coefficients$t))
+
+CI_intervals <- stats::confint(model) %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    ll = round(`2.5 %`, digits = 2),
+    ul = round(`97.5 %`, digits = 2),
+                ) %>%
+  dplyr::select(ll, ul) %>%
+  dplyr::filter(rownames(.) == fixedEffect)
+
+CI <- base::paste0("95% CI [",
+                  as.numeric(CI_intervals$ll),
+                  ", ",
+                  as.numeric(CI_intervals$ul),
+                  "]")
+
+formula <- paste(t, p, CI, sep = ", ")
+
+return(formula)
+
+rm(coefficients, t, p, CI_intervals, CI)
+}
+
+apa_lmeResults <- function(model, fixedEffect) {
+  
+coefficients <- summary(model)[["coefficients"]] %>%
+  as.data.frame() %>%
+  dplyr::rename(
+    stdError = `Std. Error`,
+    t = `t value`,
+    p = `Pr(>|t|)`) %>%
+  dplyr::mutate(
+    Estimate = round(Estimate, digits = 2),
+    df = round(df, digits = 2),
+    t = round(t, digits = 2),
+    p = round(p, digits = 3),
+  ) %>%
+  dplyr::filter(rownames(.) == fixedEffect)
+
+if(coefficients$p < .001) {
+  p <- "p<.001"
+} else {
+  p <- paste0("p=",as.numeric(coefficients$p))
+}
+
+t <- paste0("t(",as.numeric(coefficients$df),")=", as.numeric(coefficients$t))
+
+CI_intervals <- stats::confint(model) %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    ll = round(`2.5 %`, digits = 2),
+    ul = round(`97.5 %`, digits = 2),
+                ) %>%
+  dplyr::select(ll, ul) %>%
+  dplyr::filter(rownames(.) == fixedEffect)
+
+CI <- base::paste0("95% CI [",
+                  as.numeric(CI_intervals$ll),
+                  ", ",
+                  as.numeric(CI_intervals$ul),
+                  "]")
+
+formula <- paste(t, p, CI, sep = ", ")
+
+return(formula)
+
+rm(coefficients, t, p, CI_intervals, CI)
+}
+
+apa_levelDescriptives <- function(data,level, outcome) {
+
+  
+descriptiveData <- modelData %>%
+  dplyr::select(Group, Sex, sym(outcome)) %>%
+  dplyr::rename(outcome = 3)
+
+group <- descriptiveData %>%
+  dplyr::group_by(Group) %>%
+  dplyr::summarize(M = mean(outcome, na.rm = T),
+                SD = sd(outcome, na.rm = T),
+                .groups = 'drop') %>%
+  dplyr::mutate(M = round(M, digits = 2),
+                SD = round(SD, digits = 2)) %>%
+  dplyr::rename(Grouping = 1) %>%
+  as.data.frame()
+
+sex <- descriptiveData %>%
+  dplyr::group_by(Sex) %>%
+  dplyr::summarize(M = mean(outcome, na.rm = T),
+                SD = sd(outcome, na.rm = T),
+                .groups = 'drop') %>%
+  dplyr::mutate(M = round(M, digits = 2),
+                SD = round(SD, digits = 2)) %>%
+  dplyr::rename(Grouping = 1) %>%
+  as.data.frame()
+
+groupSex <- descriptiveData %>%
+  dplyr::group_by(Group, Sex) %>%
+  dplyr::summarize(M = mean(outcome, na.rm = T),
+                SD = sd(outcome, na.rm = T),
+                .groups = 'drop') %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(M = round(M, digits = 2),
+                SD = round(SD, digits = 2),
+                Grouping = paste(Group, Sex, sep = "_")) %>%
+  dplyr::select(Grouping, M, SD) %>%
+  as.data.frame()
+
+descriptives <- rbind(group,
+                      sex,
+                      groupSex) %>%
+  dplyr::filter(Grouping == level)
+  
+  output <- paste0(level,": (M=",descriptives$M,", SD=",descriptives$SD,")")
+  
+  return(output)
+  
+  rm(descriptives, group, sex, groupSex)
+  
+}
+
+
+apa_emmsPairs <- function(emmsPair, sex, Condition) {
+  summary_table <- summary(emmsPair, infer = TRUE) %>%
+    dplyr::filter(Sex == sex) %>%
+    dplyr::filter(condition == condition)
+  
+if(summary_table$p.value < .001) {
+  p <- "p < .001"
+} else {
+    p <- paste0("p=",
+                round(summary_table$p.value, digits = 3))
+  }
+  
+  if("t.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    sex,
+    ", HC - PD: (",
+    "t(",
+    round(summary_table$df, digits = 2),
+    ")=",
+    as.numeric(round(summary_table$t.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  
+  if("z.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    sex,
+    ", HC - PD: (",
+    "z = (",
+    as.numeric(round(summary_table$z.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  return(output)
+}
+
+apa_s1_emmPairs <- function(emmsPair, sex, Condition) {
+  summary_table <- summary(emmsPair, infer = TRUE) %>%
+    dplyr::filter(Sex == sex) %>%
+    dplyr::filter(condition == Condition)
+  
+  if(summary_table$p.value < .001) {
+  p <- "p<.001"
+} else {
+    p <- paste0("p=",
+                round(summary_table$p.value, digits = 3))
+  }
+  
+  if("t.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    sex,
+    ", HC - PD: (",
+    "t(",
+    round(summary_table$df, digits = 2),
+    ")=",
+    as.numeric(round(summary_table$t.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  
+  if("z.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    sex,
+    ", HC - PD: (",
+    "z=",
+    as.numeric(round(summary_table$z.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  return(output)
+}
+
+apa_s2_emmPairs <- function(emmsPair, Sex_Input, Group_Input, Contrast_Input) {
+  summary_table <- summary(emmsPair, infer = TRUE) %>%
+    dplyr::filter(Sex == Sex_Input) %>%
+    dplyr::filter(Group == Group_Input) %>%
+    dplyr::filter(contrast == Contrast_Input)
+  
+  if(summary_table$p.value < .001) {
+  p <- "p<.001"
+} else {
+    p <- paste0("p=",
+                round(summary_table$p.value, digits = 3))
+  }
+  
+  if("t.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    Sex_Input,
+    ", ",
+    Group_Input,
+    ", ",
+    Contrast_Input,
+    ": (",
+    "t(",
+    round(summary_table$df, digits = 2),
+    ")=",
+    as.numeric(round(summary_table$t.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  
+  if("z.ratio" %in% colnames(summary_table)) {
+  output <- paste(
+    Sex_Input,
+    ", ",
+    Group_Input,
+    ", ",
+    Contrast_Input,
+    ": (",
+    "z=",
+    as.numeric(round(summary_table$z.ratio, 2)),
+    ", ",
+    p,
+    ")",
+    sep = "")
+  }
+  
+  return(output)
+}
+
+
+
+```
+
+
+# RQ1 - Correlations
+1.	What is the nature and extent of the relationships between perceptual, acoustic, and kinematic measures across conversational, less clear, and more clear speaking conditions?
+    a.	What is the relationship between intelligibility and articulatory precision ratings?
+    b.	What is the relationship between acoustic measures and their underlying theoretical kinematic measures (i.e., acoustic VSA vs. kinematic VSA, acoustic distance vs. kinematic distance, F2 slope vs. kinematic speed)?
+```{r}
+vsaMeasures <- rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/CollatedData/TargetMeasures_vsaMeasures.csv") %>%
+  dplyr::mutate(Sex = factor(Sex, levels = c("M","F")),
+                aVSA = aVSA/1000)
+
+aiMeasures <- rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/CollatedData/TargetMeasures_aiMeasures.csv") %>%
+  dplyr::mutate(Sex = factor(Sex, levels = c("M","F")))
+```
+
+
+### 1A - Int & AP
+What is the relationship between intelligibility and articulatory precision ratings?
+```{r}
+
+# VSA Data
+stats::cor.test(x = vsaMeasures$Int_M,
+                y = vsaMeasures$AP_M,
+                method = "pearson")
+
+# Diphthong Data
+stats::cor.test(x = aiMeasures$Int_M,
+                y = aiMeasures$AP_M,
+                method = "pearson")
+
+```
+
+## Correlations
+```{r}
+
+# VSA Data
+corrr::correlate(vsaMeasures %>% dplyr::select(Int_M, AP_M, aVSA, kVSA))
+
+# Diphthong Data
+corrr::correlate(aiMeasures %>% 
+                               dplyr::select(Int_M,
+                                             AP_M,
+                                             acoDistance,
+                                             F2_Slope,
+                                             kinDistance,
+                                             kinSpeed),
+                             method = "pearson")
+
+
+stats::cor.test(x = vsaMeasures$aVSA,
+                y = vsaMeasures$kVSA,
+                method = "pearson")
+```
+# RQ2 - Models
+2.	What is the relationship between the selected acoustic/kinematic measures and perceptual ratings of speech intelligibility and articulatory precision across the three speaking conditions?
+## 1. Point-Based Measures
+```{r}
+vsaMeasures <-
+  rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/CollatedData/TargetMeasures_vsaMeasures.csv") %>%
+  dplyr::mutate(Sex = factor(Sex, levels = c("M", "F")),
+                aVSA = aVSA / 1000)
+
+modelData <- vsaMeasures %>%
+  dplyr::rename(SpeakerID = StudyID)
+
+# Taking out the trash
+rm(vsaMeasures)
+```
+
+### Intelligibility
+M1 - Comprehensive Model
+```{r}
+Int_PBS_m1 <- robustlmm::rlmer(Int_M ~
+                                 aVSA * Sex +
+                                 #kVSA * Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(Int_PBS_m1)
+```
+We can see that only the aVSA, Sex, and aVSA x Sex predictors were significant. So we will only retain those in the most parsimonious model.
+
+M2
+```{r}
+Int_PBS_m2 <- robustlmm::rlmer(Int_M ~
+                                 aVSA * Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(Int_PBS_m2)
+```
+
+Final Model
+```{r}
+Int_PBS <- Int_PBS_m2
+
+summary(Int_PBS)
+sjPlot::tab_model(Int_PBS)
+
+# Saving the model
+base::saveRDS(object = Int_PBS,
+              file = "Models/Int_PBS.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^Int_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+
+### Articulatory Precision
+M1 - Comprehensive Model
+```{r}
+AP_PBS_m1 <- robustlmm::rlmer(AP_M ~
+                                aVSA * Sex +
+                                kVSA * Sex +
+                                (1 | SpeakerID),
+                              data = modelData)
+
+sjPlot::tab_model(AP_PBS_m1)
+```
+We can see that only the aVSA, Sex, and aVSA x Sex predictors were significant. So we will only retain those in the most parsimonious model.
+
+M2
+```{r}
+AP_PBS_m2 <- robustlmm::rlmer(AP_M ~
+                                 aVSA * Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(AP_PBS_m2)
+```
+
+Final Model
+```{r}
+AP_PBS <- AP_PBS_m2
+
+summary(AP_PBS)
+sjPlot::tab_model(AP_PBS)
+
+# Saving the model
+base::saveRDS(object = AP_PBS,
+              file = "Models/AP_PBS.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^AP_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+
+### Saving Models
+Saving the models for the table
+```{r}
+base::saveRDS(Int_PBS_m1, file = "Models/Int_PBS_m1.rds")
+base::saveRDS(AP_PBS_m1, file = "Models/AP_PBS_m1.rds")
+```
+
+## 2. Transition-Based Measures
+```{r}
+aiMeasures <-
+  rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/CollatedData/TargetMeasures_aiMeasures.csv") %>%
+  dplyr::mutate(Sex = factor(Sex, levels = c("M", "F")))
+
+modelData <- aiMeasures %>%
+  dplyr::rename(SpeakerID = StudyID)
+
+# Taking out the trash
+rm(aiMeasures)
+```
+
+### Intelligibility
+M1 - Comprehensive Model
+```{r}
+Int_TBS_m1 <- robustlmm::rlmer(Int_M ~
+                                 acoDistance * Sex +
+                                 kinDistance * Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(Int_TBS_m1)
+```
+We can see that only the kinDistance, and Sex were significant. So we will only retain those in the most parsimonious model.
+
+M2
+```{r}
+Int_TBS_m2 <- robustlmm::rlmer(Int_M ~
+                                 kinDistance +
+                                 Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(Int_TBS_m2)
+```
+
+Final Model
+```{r}
+Int_TBS <- Int_TBS_m2
+
+summary(Int_TBS)
+sjPlot::tab_model(Int_TBS)
+
+# Saving the model
+base::saveRDS(object = Int_TBS,
+              file = "Models/Int_TBS.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^Int_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+### Articulatory Precision
+M1 - Comprehensive Model
+```{r}
+AP_TBS_m1 <- robustlmm::rlmer(AP_M ~
+                                 acoDistance * Sex +
+                                 kinDistance * Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(AP_TBS_m1)
+```
+We can see that only the kinDistance, and Sex were significant. So we will only retain those in the most parsimonious model.
+
+M2 - Comprehensive Model
+```{r}
+AP_TBS_m2 <- robustlmm::rlmer(AP_M ~
+                                 kinDistance +
+                                 Sex +
+                                 (1 | SpeakerID),
+                               data = modelData)
+
+sjPlot::tab_model(AP_TBS_m2)
+```
+
+Final Model
+```{r}
+AP_TBS <- AP_TBS_m2
+
+summary(AP_TBS)
+sjPlot::tab_model(AP_TBS)
+
+# Saving the model
+base::saveRDS(object = AP_TBS,
+              file = "Models/AP_TBS.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^AP_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+### Saving Models
+Saving the models for the table
+```{r}
+base::saveRDS(Int_TBS, file = "Models/Int_TBS_m1.rds")
+base::saveRDS(AP_TBS_m1, file = "Models/AP_TBS_m1.rds")
+```
+
+## 3. Spatiotemporal Measures
+```{r}
+aiMeasures <-
+  rio::import(file = "https://raw.githubusercontent.com/AustinRThompson/multidomain-vowelArtic-PD/main/Data/PreppedData/CollatedData/TargetMeasures_aiMeasures.csv") %>%
+  dplyr::mutate(Sex = factor(Sex, levels = c("M", "F")))
+
+modelData <- aiMeasures %>%
+  dplyr::rename(SpeakerID = StudyID)
+
+# Taking out the trash
+rm(aiMeasures)
+```
+
+### Intelligibility
+M1
+```{r}
+# Building the model
+Int_SpaTemp_m1 <- robustlmm::rlmer(Int_M ~
+                                     F2_Slope * Sex +
+                                     kinSpeed * Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(Int_SpaTemp_m1)
+```
+Only sex was a significant predictor of intelligibility.
+
+M2
+```{r}
+# Building the model
+Int_SpaTemp_m2 <- robustlmm::rlmer(Int_M ~
+                                     F2_Slope +
+                                     kinSpeed +
+                                     Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(Int_SpaTemp_m2)
+```
+
+M3
+```{r}
+# Building the model
+Int_SpaTemp_m3 <- robustlmm::rlmer(Int_M ~
+                                     Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(Int_SpaTemp_m3)
+```
+
+Final Model
+```{r}
+Int_SpaTemp <- Int_SpaTemp_m3
+
+summary(Int_SpaTemp)
+sjPlot::tab_model(Int_SpaTemp)
+
+# Saving the model
+base::saveRDS(object = Int_SpaTemp,
+              file = "Models/Int_SpaTemp.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^Int_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+
+### Articulatory Precision
+M1
+```{r}
+# Building the model
+AP_SpaTemp_m1 <- robustlmm::rlmer(AP_M ~
+                                     F2_Slope * Sex +
+                                     kinSpeed * Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(AP_SpaTemp_m1)
+```
+Only sex was a significant predictor of articulatory precision
+
+M2
+```{r}
+# Building the model
+AP_SpaTemp_m2 <- robustlmm::rlmer(AP_M ~
+                                     F2_Slope +
+                                     kinSpeed +
+                                     Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(AP_SpaTemp_m2)
+```
+Removing the sex interactions revealed that F2 slope appears to be a meaningful predictor of articulatory precision. Let's continue to remove non significant variables to obtain the most parsimonious model.
+
+M3
+```{r}
+# Building the model
+AP_SpaTemp_m3 <- robustlmm::rlmer(AP_M ~
+                                     F2_Slope +
+                                     Sex +
+                                     (1 | SpeakerID),
+                                   data = modelData)
+# Model summary
+sjPlot::tab_model(AP_SpaTemp_m3)
+```
+
+Final Model
+```{r}
+AP_SpaTemp <- AP_SpaTemp_m3
+
+summary(AP_SpaTemp)
+sjPlot::tab_model(AP_SpaTemp)
+
+# Saving the model
+base::saveRDS(object = AP_SpaTemp,
+              file = "Models/AP_SpaTemp.rds")
+
+# Taking out the trash
+rm(list = ls(pattern = "^AP_m"))
+rm(list = ls(pattern = "^emms_"))
+```
+
+### Saving Models
+Saving the models for the table
+```{r}
+base::saveRDS(Int_SpaTemp_m1, file = "Models/Int_SpaTemp_m1.rds")
+base::saveRDS(Int_SpaTemp_m2, file = "Models/Int_SpaTemp_m2.rds")
+base::saveRDS(AP_SpaTemp_m1, file = "Models/AP_SpaTemp_m1.rds")
+base::saveRDS(AP_SpaTemp_m2, file = "Models/AP_SpaTemp_m2.rds")
+```
